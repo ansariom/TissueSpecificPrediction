@@ -92,3 +92,29 @@ head(cage)
 cage$tpm_range = cut(cage$tpm, breaks = c(0, 5, 10, 50, 100, 10000))
 table(cage$tpm_range)
 table(cage$cell_line)
+
+
+enterz = read.delim(paste(indir, "/ncbi_genes_human.txt", sep = ""), sep = "\t", header = T)[,c(2,4)]
+ensml = read.delim(paste(indir, "/ensmbl_gene_list.txt", sep = ""), sep = "\t", col.names = c("ens.id", "ens.name"))
+gene_table = merge(enterz, ensml, by.x = "Approved.symbol", by.y = "ens.name")
+write.table(gene_table, file = paste(indir, "/enterz_ensembl_gene_conversion_table.txt", sep = ""), quote = F, row.names = F, col.names = T, sep = "\t")
+
+head(cage)
+head(norm.data)
+
+
+## get data ready for Model
+
+TEP_header = c("Chromosome","Strand","Start","End","ReadCount","ModeLocation","ModeReadCount","Shape","TranscriptLocation","TranscriptID","GeneName","GeneType","X..Capped","tissue")
+cage = merge(cage, gene_table, by.x = "gene_id", by.y = "NCBI.gene.ID")
+cage = cage[,c("Chr", "Strand", "Start", "End", "tpm", "ens.id")] 
+colnames(cage)[1:5] <- TEP_header[1:5]
+colnames(cage)[6] <- "GeneName"
+cage$ModeLocation <- as.numeric(cage$Start) + abs(as.numeric(cage$End) - as.numeric(cage$Start))/2
+cage$ModeReadCount = cage$ReadCount/2
+head(cage)
+cage$Shape = "None"
+cage$TranscriptLocation = "tss"
+cage$TranscriptID = cage$GeneName
+cage$GeneType = "gene"
+cage$X..Capped = 100
