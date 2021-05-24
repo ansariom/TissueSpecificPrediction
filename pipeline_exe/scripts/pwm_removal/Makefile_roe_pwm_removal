@@ -1,0 +1,111 @@
+queues = megraw,bpp@*
+python_bin = /local/cluster/bin/python
+prefix = pwm_removal/roe
+nfolds = 5
+
+#fc 3 med-high
+roe_seed = 810376
+
+# fc 2.5 med-high
+#roe_seed = 956178
+#
+main_dir = ../pipeline_output_roe
+orig_coefs = $(main_dir)/med_high/$(fc)/l1_logreg/$(roe_seed)/roe_only_coef_table.txt
+from = 45
+to = 75
+by = 20
+features = $(main_dir)//all_features_diffs_wide_withAT.rdat
+#features = $(main_dir)/med_high/$(fc)/l1_logreg/$(roe_seed)/all_features_diffs_wide.rdat
+
+fc = 3
+mean_expr_file = external_tools/RNASeq_run1199/rsem_output/ath_root_leaf_rsem_deseq_diff_expr_results_filtered.txt
+expr_thr = "med_high"
+fc_out = $(prefix)/$(fc)
+
+src_rm_dir = ../scripts/pwm_removal/
+src_ml_dir = ../scripts/ML/
+src_utils_dir = ../scripts/utils_paper
+
+all:
+	mkdir -p $(fc_out)
+	echo $(src_rm_dir)/extract_pwms_for_removal.R $(orig_coefs) $(fc_out) $(from) $(to) $(by) | SGE_Array -q $(queues) -m 10G -r j1_init_logs; \
+	n=$(from); while [[ $$n -le $(to) ]]; do \
+		echo $$n; \
+		outdir=$(fc_out)/top$$n; \
+		mkdir -p $$outdir; \
+	        echo $(src_utils_dir)/remove_features.R $(features) $(fc_out)/top$$n\_pwms.txt $$outdir  top$$n | \
+                        SGE_Array -q $(queues) -m 10G -r $$outdir/j1_rm_features_$$n --hold_names j1_init_logs;\
+                echo $(src_ml_dir)/prepare_data_for_classification_fc_expr_thresholded.R $$outdir/all_features_diffs_wide_top$$n\_removal.rdat roe_only $$outdir/roe_only_features_classed.csv $$outdir/roe_only_diff_info.csv $(fc) $(mean_expr_file) $(expr_thr) |\
+                        SGE_Array -m 50G -q $(queues) -r $$outdir/j1_prepare_train_data_$$n --hold_names $$outdir/j1_rm_features_$$n; \
+		echo $(python_bin) $(src_ml_dir)/train_test_crossVal_noScale_l1.py -i $$outdir/roe_only_features_classed.csv -o $$outdir -n $(nfolds) -t roe_only |\
+			SGE_Array -q $(queues) -m 100G -r $$outdir/j1_crossval_train_test_$$n --hold_names $$outdir/j1_prepare_train_data_$$n; \
+		((n = n + $(by))); \
+	done
+
+
+rm_features:
+	echo $(src_utils_dir)/remove_features.R $(features) $(fc_out)/top$$n\_pwms.txt $$outdir  top$$n | \
+                        SGE_Array -q $(queues) -m 10G -r $$outdir/j1_rm_features_$$n --hold_names j1_init_logs;\
+                echo $(src_ml_dir)/prepare_data_for_classification_fc_expr_thresholded.R $$outdir/all_features_diffs_wide_top$$n\_removal.rdat roe_only $$outdir/roe_only_features_classed.csv $$outdir/roe_only_diff_info.csv $(fc) $(mean_expr_file) $(expr_thr) |\
+                        SGE_Array -m 50G -q $(queues) -r $$outdir/j1_prepare_train_data_$$n --hold_names $$outdir/j1_rm_features_$$n
+
+perfromance_gathering:
+	i=$(from); while [[ $$i -lt $(to) ]]; do \
+		indir=$(fc_out)/top$$i; \
+		echo $$indir; \
+		outfile=$(fc_out)/performances_top$$i\.txt; \
+		head $$indir/[1-9]*/*held* | grep -v "==" | grep -v "auroc" > $$outfile; \
+		((i = i+$(by))); \
+	done
+
+plot:
+	mkdir $(fc_out)/perf_tables;  mv $(fc_out)/performances_top* $(fc_out)/perf_tables; \
+        $(src_rm_dir)/plot_removal_performance.R $(fc_out)/perf_tables $(fc_out)/perf_plot ROE $(from) $(to) $(by)
+
+
+######
+seqcont_dir = seqContentTest/
+#fname="GC_ATContent"
+fname="ATContent"
+#fname="GCContent"
+seqCon_file = $(seqcont_dir)/$(fname).csv
+features_seqcontent_outfile = $(seqcont_dir)/$(fname).rdat
+classed_features_file = $(seqcont_dir)/$(fname)_classed.csv
+diff_outfile = $(seqcont_dir)/$(fname)_diff_info.csv
+
+seq_content:
+	outdir=$(seqcont_dir)/$(fname); \
+	mkdir -p $$outdir; \
+	echo $(python_bin) software/get_seq_content_tiled.py tmp.csv |\
+		SGE_Array -m 50G -q $(queues) -r $$outdir/j0_get_data_logs; \
+	echo "cat tmp.csv | awk '{if (NR == 1) {print substr(\$$0,4)} else {print \$$0}}' > $(seqCon_file)" |\
+		SGE_Array -q $(queues) -r $$outdir/j01_edit_eader_logs --hold_names $$outdir/j0_get_data_logs; \
+	echo software/seqContent_features.R $(seqCon_file) $(mean_expr_file) $(features_seqcontent_outfile) |\
+		SGE_Array -m 50G -q $(queues) -r $$outdir/j1_features_log --hold_names $$outdir/j01_edit_eader_logs; \
+	echo software/prepare_data_for_classification_fc_expr_thresholded.R $(features_seqcontent_outfile) "seqContent" $(classed_features_file) $(diff_outfile) $(fc) $(mean_expr_file) $(expr_thr) |\
+		SGE_Array -m 50G -q $(queues) -r $$outdir/j1_prepare_train_data --hold_names $$outdir/j1_features_log; \
+	echo $(python_bin) software/train_test_crossVal_noScale.py -i $(classed_features_file) -o $$outdir -n $(nfolds) -t seqContent |\
+			SGE_Array -q $(queues) -m 100G -r $$outdir/j1_crossval_train_test --hold_names $$outdir/j1_prepare_train_data
+
+
+seq_perf_gathering:
+	indir=$(seqcont_dir)/$(fname); \
+	echo $$indir; \
+	outfile=$(fname)\.performances\.txt; \
+	head $$indir/[1-9]*/*held* | grep -v "==" | grep -v "auroc" | awk '{print $$0"\t"$(fname)}' > $$outfile
+
+seq_plot:
+	mkdir $(seqcont_dir)/perf_tables; mv *Content\.performances\.txt $(seqcont_dir)/perf_tables; \
+	../software/plot_removal_performance_seqContent.R $(seqcont_dir)/perf_tables $(seqcont_dir)/perf_plot ROE 0 0 0
+
+seq_coef_ranks:
+	indir=$(seqcont_dir)/$(fname); \
+	echo $$indir; \
+	outfile=$(seqcont_dir)/$(fname)\.coefs\.txt; \
+	cat $$indir/[1-9]*/*coef* | awk '{print $$0"\t"$(fname)}' > $$outfile
+
+seq_plot_coefs:
+	mkdir $(seqcont_dir)/coefs; mv $(seqcont_dir)/*coefs\.txt $(seqcont_dir)/coefs; \
+	../software/plot_coefs_seqContent.R $(seqcont_dir)/coefs $(seqcont_dir)/coefs_plot
+
+

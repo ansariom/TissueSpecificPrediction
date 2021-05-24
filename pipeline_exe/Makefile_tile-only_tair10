@@ -1,0 +1,338 @@
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#                             LATEST CHANGES
+#  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+# 1- Final pipeline for paper submission
+# 2- TFBS features are normalized by window length (L)
+# 3- sequence headers are changes to transcriptID_chr_TSS-mode_strand
+# 4- using Russ's split train/test set controlling balanced classes
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+tair_annotated_peaks = $(prefix)/peaks_tair_annotated.csv
+#  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#                 Configuration
+#  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+scripts_dir = scripts
+fastq_dir = ../publication_data_and_model_distribution/raw_data
+queues = bpp@megraw*,*@megraw2*
+
+tair_dir = /dfs/BPP/Megraw_Lab/data/public_db/tair10
+bowtie_db = $(tair_dir)/db
+gff = $(tair_dir)/TAIR10_GFF3_genes.gff
+genome = $(tair_dir)/genome.fas
+pwm = $(processed_data_outdir)/pwm_processing/pwms_peat_core_agris_hughes_V4.mat
+pwm_noexpr_coreless = $(processed_data_outdir)/pwm_processing//pwms_peat_core_agris_hughes_V4_noExprPWMs.txt
+
+processed_data_outdir = ../publication_data_and_model_distribution/processed_data/
+prefix = supplementary_materials/tair_annotated/tile
+
+threshold_oc = 4
+
+input_tss_fastq_leaf = $(fastq_dir)/ath_tss_leaf.fastq
+input_tss_fastq_root = $(fastq_dir)/ath_tss_root.fastq
+input_oc_fastq_leaf = $(fastq_dir)/arab_leaf_oc_12hr_20bp.fastq
+input_oc_fastq_root = $(fastq_dir)/arab_root_oc_12hr_20bp.fastq
+input_expr_diff = external_tools/RNASeq_run1199/rsem_output/ath_root_leaf_rsem_deseq_diff_expr_results_filtered.txt
+mean_expr_file = $(input_expr_diff)
+
+pseudoCounts = 0.001
+
+up_oc1 = 500
+down_oc1 = 0
+
+tile_nucsUp = 1000
+tile_nucsDown = 500
+tileWin = 100
+
+# generating fake sequences as same size of peaks_3000.fa in order to run TFBS scanner on SGE
+# Splits all promoter seqs into X files containing 500 sequences each. We need to provide the number of sequences ahead of running TFBS scan and after generting peaks_300.fa file 
+nseqs_per_file = 500
+npeaks = 50636
+max_loglik_scores = $(prefix)/tile_max_loglik_scores.txt 
+
+tss_region_for_oc_overall_1 = $(prefix)/tss_up$(up_oc1)_down$(down_oc1)_region.bed
+
+
+## JAMM Peaks related ###
+leaf_basename = "ath-leaf-1192"
+root_basename = "ath-root-1168"
+
+leaf_covg_outfile = $(prefix)/$(leaf_basename).covg
+root_covg_outfile = $(prefix)/$(root_basename).covg
+
+## Model training related ##
+nfolds = 5
+
+# set this number after running train-l1 and choose the nest performing model
+roe_seed = 67086
+
+# This directory contains final model materials
+roe_outdir = $(prefix)/tile_only_out
+roe_outdir_fc = $(roe_outdir)/$(expr_thr)/$(fc)/$(model_type)/$(roe_seed)
+model_outdir = $(prefix)/$(expr_thr)/$(fc)/$(model_type)
+final_model_outdir = ../publication_data_and_model_distribution/model/
+fc = 3
+expr_thr = "med_high"
+model_type = "l1_logreg"
+
+python_bin = /local/cluster/bin/python
+python_3_bin = /local/cluster/bin/python3.5
+
+#  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#                        PIPELINE
+#  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+all: run_all
+run_all: get_all_features %aligned.peaks.annotated.capped.filtered %featureInfo_hardCodedSoftCoded.rdat
+
+get_final_package: copy_model 
+
+clean: 
+	rm -rf $(prefix) 
+
+
+skip_making_bams = 0
+
+
+
+###################################################
+###   STEP-2    DNase-seq                       ###
+###################################################
+
+%oc_alignment_leaf.bam:
+ifeq ($(skip_making_bams),1)
+	echo DEPS $*oc_alignment_leaf.bam:
+	mkdir -p $(prefix)
+	echo ln -s ../$(premadefiles)/oc_alignment_leaf.bam $(prefix)/oc_alignment_leaf.bam |\
+		SGE_Array -P 1 -q $(queues) -m 1G -r $(prefix)/j1_oc_leaf_bowtie_logs 
+else
+	echo DEPS $*oc_alignment_leaf.bam: $(input_oc_fastq_leaf) $(bowtie_db).1.ebwt |\
+	echo bowtie -p 40 -v 0 -m 1 -a --best --strata --sam-no-qname-trunc -S $(bowtie_db) $(input_oc_fastq_leaf) \| $(scripts_dir)/remove_no_hits.pl \| $(scripts_dir)/samtools sort -T \$$TMPDIR/tempfiles -O bam \> $(prefix)/oc_alignment_leaf.bam |\
+		SGE_Array -P 10 -q $(queues) -m 40G -r $(prefix)/j1_oc_leaf_bowtie_logs
+endif
+
+
+
+%oc_alignment_leaf.bed: %oc_alignment_leaf.bam
+	echo DEPS $*oc_alignment_leaf.bed: $*oc_alignment_leaf.bam
+	echo $(scripts_dir)/bamToBed -i $(prefix)/oc_alignment_leaf.bam \| grep -v \'Chr[CM]\' \> $(prefix)/oc_alignment_leaf.bed | \
+ 		SGE_Array -q $(queues) -m 40G -r $(prefix)/j2_oc_leaf_bamtobed_logs --hold_names $(prefix)/j1_oc_leaf_bowtie_logs
+		
+
+#%oc_peaks_leaf.bed: %oc_alignment_leaf.bed
+%oc_peaks_leaf.bed:
+	echo DEPS $*oc_peaks_leaf.bed: $*oc_alignment_leaf.bed
+	echo mkdir -p $(prefix)/peaks_dir_leaf\; cd $(prefix)/peaks_dir_leaf\; ../../external_tools/fseq-1.84/bin/fseq -f 0 -l 200 -of bed -t $(threshold_oc) ../oc_alignment_leaf.bed\; cat Chr*.bed \> ../oc_peaks_leaf.bed\; rm Chr*.bed | \
+		SGE_Array -q $(queues) -m 100G -r $(prefix)/j3_oc_leaf_peak_logs --hold_names $(prefix)/j2_oc_leaf_bamtobed_logs
+
+clean_oc: 
+	echo DEPS clean_oc: 
+	rm $(prefix)/oc_*
+	rm -rf $(prefix)/j*_oc*
+
+
+### Merging to create OC percentage features for leaf
+%features_long_oc_p_leaf.txt:
+	echo DEPS $*features_long_oc_p_leaf.txt: $*oc_peaks_leaf.bed $*features_long.txt $*features_map.txt
+	echo $(scripts_dir)/oc_utils/compute_oc_overlap.sh $(prefix)/features_map.txt $(prefix)/oc_peaks_leaf.bed OC_P_LEAF $(prefix)/features_long_oc_p_leaf.txt $(prefix)/roes 100000 40 |\
+		SGE_Array -P 40 -q *@megraw2* -m 200G -r $(prefix)/j1_merge_oc_p_leaf_logs --hold_names $(prefix)/j3_oc_leaf_peak_logs,$(prefix)/j9_genfeatures_logs,$(prefix)/j8.1_$*
+
+### Generating OC features, Root
+%oc_alignment_root.bam:
+ifeq ($(skip_making_bams),1)
+	echo DEPS $*oc_alignment_root.bam:
+	mkdir -p $(prefix)
+	echo ln -s ../$(premadefiles)/oc_alignment_root.bam $(prefix)/oc_alignment_root.bam | \
+		SGE_Array -P 1 -q $(queues) -m 1G -r $(prefix)/j1_oc_root_bowtie_logs
+else
+	echo DEPS $*oc_alignment_root.bam: $(input_oc_fastq_root) $(bowtie_db).1.ebwt
+	echo bowtie -p 40 -v 0 -m 1 -a --best --strata --sam-no-qname-trunc -S $(bowtie_db) $(input_oc_fastq_root) \| $(scripts_dir)/remove_no_hits.pl \| $(scripts_dir)/samtools sort -T \$$TMPDIR/tempfiles -O bam \> $(prefix)/oc_alignment_root.bam | \
+		SGE_Array -P 10 -q $(queues) -m 40G -r $(prefix)/j1_oc_root_bowtie_logs
+endif
+
+
+
+%oc_alignment_root.bed: %oc_alignment_root.bam
+	echo DEPS $*oc_alignment_root.bed: $*oc_alignment_root.bam
+	echo $(scripts_dir)/bamToBed -i $(prefix)/oc_alignment_root.bam \| grep -v \'Chr[CM]\' \> $(prefix)/oc_alignment_root.bed | \
+ 		SGE_Array -q $(queues) -m 40G -r $(prefix)/j2_oc_root_bamtobed_logs --hold_names $(prefix)/j1_oc_root_bowtie_logs
+		
+
+#%oc_peaks_root.bed: %oc_alignment_root.bed
+%oc_peaks_root.bed:
+	echo DEPS $*oc_peaks_root.bed: $*oc_alignment_root.bed
+	echo mkdir -p $(prefix)/peaks_dir_root\; cd $(prefix)/peaks_dir_root\; ../../external_tools/fseq-1.84/bin/fseq -f 0 -l 200 -of bed -t $(threshold_oc) ../oc_alignment_root.bed\; cat Chr*.bed \> ../oc_peaks_root.bed\; rm Chr*.bed | \
+		SGE_Array -q $(queues) -m 100G -r $(prefix)/j3_oc_root_peak_logs --hold_names $(prefix)/j2_oc_root_bamtobed_logs
+
+### Merging to create OC percentage features for root
+%features_long_oc_p_root.txt:
+	echo DEPS $*features_long_oc_p_root.txt: $*oc_peaks_root.bed $*features_long.txt $*features_map.txt
+	echo $(scripts_dir)/oc_utils/compute_oc_overlap.sh $(prefix)/features_map.txt $(prefix)/oc_peaks_root.bed OC_P_ROOT $(prefix)/features_long_oc_p_root.txt $(prefix)/roes 100000 40 |\
+                SGE_Array -P 40 -q *@megraw* -m 200G -r $(prefix)/j1_merge_oc_p_root_logs --hold_names $(prefix)/j3_oc_root_peak_logs,$(prefix)/j9_genfeatures_logs
+
+
+%features_long_oc_p_overall_1_leaf.txt:  
+	echo $(scripts_dir)/oc_utils/compute_range_overlap.sh $(tss_region_for_oc_overall_1) $(prefix)/oc_peaks_leaf.bed LEAF $(prefix)/features_long_oc_p_overall_1_leaf.txt |\
+		SGE_Array -q $(queues) -m 200G -r $(prefix)/j7.5.1_oc_p_overall_1_leaf_logs --hold_names $(prefix)/j3_oc_leaf_peak_logs,$(prefix)/j7.3.1_get_overall_oc1_region_logs
+
+%features_long_oc_p_overall_1_root.txt: 
+	echo $(scripts_dir)/oc_utils/compute_range_overlap.sh $(tss_region_for_oc_overall_1) $(prefix)/oc_peaks_root.bed ROOT $(prefix)/features_long_oc_p_overall_1_root.txt |\
+		SGE_Array -q $(queues) -m 200G -r $(prefix)/j7.5.1_oc_p_overall_1_root_logs --hold_names $(prefix)/j3_oc_root_peak_logs,$(prefix)/j7.3.1_get_overall_oc1_region_logs
+
+%tiled_features_long_oc_p_leaf.txt:
+	echo $(scripts_dir)/oc_utils/compute_oc_overlap.sh $(prefix)/tiled_features_map.txt $(prefix)/oc_peaks_leaf.bed OC_P_LEAF $(prefix)/tiled_features_long_oc_p_leaf.txt $(prefix)/tiled 100000 40 |\
+                SGE_Array -P 40 -q $(queues) -m 200G -r $(prefix)/j1b_merge_oc_p_leaf_tiled_logs --hold_names $(prefix)/j9b_genfeatures_tiled_logs,$(prefix)/j3_oc_leaf_peak_logs
+
+%tiled_features_long_oc_p_root.txt:
+	echo $(scripts_dir)/oc_utils/compute_oc_overlap.sh $(prefix)/tiled_features_map.txt $(prefix)/oc_peaks_root.bed OC_P_ROOT $(prefix)/tiled_features_long_oc_p_root.txt $(prefix)/tiled 100000 40 |\
+                SGE_Array -P 40 -q *@megraw2* -m 200G -r $(prefix)/j1b_merge_oc_p_root_tiled_logs --hold_names $(prefix)/j9b_genfeatures_tiled_logs,$(prefix)/j3_oc_root_peak_logs
+
+%tiled_oc_leaf_wide.rdat: %tiled_features_long_oc_p_leaf.txt
+	echo $(scripts_dir)/long_to_wide.R $(prefix)/tiled_features_long_oc_p_leaf.txt $(prefix)/tiled_oc_leaf_wide.rdat |\
+                SGE_Array -q *@megraw1* -m 400G -r $(prefix)/jm2_oc_leaf_wide_logs --hold_names $(prefix)/j1b_merge_oc_p_leaf_tiled_logs
+
+%tiled_oc_root_wide.rdat: %tiled_features_long_oc_p_root.txt
+	echo $(scripts_dir)/long_to_wide.R $(prefix)/tiled_features_long_oc_p_root.txt $(prefix)/tiled_oc_root_wide.rdat |\
+                SGE_Array -q *@megraw2* -m 400G -r $(prefix)/jm2_oc_root_wide_logs --hold_names $(prefix)/j1b_merge_oc_p_root_tiled_logs
+
+%oc_p_overall_1_leaf_wide.rdat: %features_long_oc_p_overall_1_leaf.txt
+	echo $(scripts_dir)/long_to_wide.R $(prefix)/features_long_oc_p_overall_1_leaf.txt $(prefix)/oc_p_overall_1_leaf_wide.rdat |\
+                SGE_Array -q $(queues) -m 200G -r $(prefix)/jm3.1_oc_p_overall_leaf_wide_logs --hold_names $(prefix)/j7.5.1_oc_p_overall_1_leaf_logs
+
+%oc_p_overall_1_root_wide.rdat: %features_long_oc_p_overall_1_root.txt
+	echo $(scripts_dir)/long_to_wide.R $(prefix)/features_long_oc_p_overall_1_root.txt $(prefix)/oc_p_overall_1_root_wide.rdat |\
+                SGE_Array -q $(queues) -m 200G -r $(prefix)/jm3.1_oc_p_overall_root_wide_logs --hold_names $(prefix)/j7.5.1_oc_p_overall_1_root_logs
+
+
+###################################################
+###   STEP-3    extract promoter seqs           ###
+###		find ROE regions		###
+###		generate TFBS features		###
+###		combine all features		###
+###################################################
+tair_peaks_file = $(prefix)/peaks_tair_annotated.csv
+main_peaks = pipeline_output_tile/aligned.peaks.annotated.capped.filtered
+tair10_start_locs = supplementary_materials/data/tair10/TAIR10_GFF3_genes.tair_annotated_start.txt
+
+%peaks_tair_annotated.csv:
+	echo $(scripts_dir)/utils_paper/create_tair-annotated_tss_peaks.R $(main_peaks) $(tair10_start_locs) $(tair_peaks_file) | \
+		SGE_Array -q $(queues) -m 10G -r $(prefix)/j0_get_tair_peaks_logs
+
+%peaks_3000_region.fa: %peaks_tair_annotated.csv
+	echo DEPS $*peaks_3000_region.fa: $*aligned.peaks.annotated.capped.filtered
+	echo "$(scripts_dir)/seq_utils/get_seqs_stranded_oneLin_ibdc_header.pl $(prefix)/peaks_tair_annotated.csv 3000 3000 $(genome)| $(scripts_dir)/dedup_fasta.sh > $(prefix)/peaks_3000_region.fa" |\
+		SGE_Array -q $(queues) -m 10G -r $(prefix)/j7.2_get_peaks_seqs_logs --hold_names $(prefix)/j0_get_tair_peaks_logs
+
+$(tss_region_for_oc_overall_1): %peaks_3000_region.fa
+	echo $(scripts_dir)/seq_utils/get_tss_region.sh $(up_oc1) $(down_oc1) 3000 3000 $(prefix)/peaks_3000_region.fa \> $(tss_region_for_oc_overall_1) |\
+	SGE_Array -q $(queues) -r $(prefix)/j7.3.1_get_overall_oc1_region_logs --hold_names $(prefix)/j7.2_get_peaks_seqs_logs
+
+$(tss_region_for_oc_overall_2): $(tss_region_for_oc_overall_1)
+	echo $(scripts_dir)/seq_utils/get_tss_region.sh $(up_oc2) $(down_oc2) 3000 3000 $(prefix)/peaks_3000_region.fa \> $(tss_region_for_oc_overall_2) |\
+		SGE_Array -q $(queues) -r $(prefix)/j7.3.2_get_overall_oc2_region_logs --hold_names $(prefix)/j7.3.1_get_overall_oc1_region_logs
+
+%max_pwm_scores.txt:
+	echo $(python_bin) $(scripts_dir)/pwm_utils/compute_max_loglik_score.py $(pwm) tmp.txt \; tail -n +2 tmp.txt \> $(prefix)/max_pwm_scores.txt \; rm -f tmp.txt |\
+	SGE_Array -q $(queues) -r $(prefix)/get_pwm_max_logs
+
+%tiled_features_raw.rdat: $(tss_region_for_oc_overall_1)
+	echo $(scripts_dir)/get_features_inparallel.sh $(prefix)/peaks_3000_region.fa $(prefix) $(prefix)/tiled_features.rdat $(prefix)/tiled_features_map.txt $(tile_nucsUp) $(tile_nucsDown) $(tileWin) $(pwm) | \
+                SGE_Array -P 30 -q $(queues) -m 400G -r $(prefix)/j9b_genfeatures_tiled_logs --hold_names $(prefix)/j7.2_get_peaks_seqs_logs
+
+
+%tiled_features.rdat: %max_pwm_scores.txt $(tss_region_for_oc_overall_1)
+	echo $(scripts_dir)/feature_utils/get_features_inparallel_tile_maxNorm.sh $(prefix)/peaks_3000_region.fa $(prefix) $(prefix)/tiled_features.rdat $(prefix)/tiled_features_map.txt $(tile_nucsUp) $(tile_nucsDown) $(tileWin) $(pwm) $(prefix)/max_pwm_scores.txt |\
+                SGE_Array -P 30 -q $(queues) -m 400G -r $(prefix)/j9b_genfeatures_tiled_logs --hold_names $(prefix)/j7.2_get_peaks_seqs_logs
+
+combine_oc_tfbs_features: %tiled_features.rdat %oc_p_overall_1_root_wide.rdat %oc_p_overall_1_leaf_wide.rdat %tiled_oc_leaf_wide.rdat %tiled_oc_root_wide.rdat
+	echo $(scripts_dir)/feature_utils/merge_features_tile_only.R $(prefix)/tiled_features.rdat $(prefix)/oc_p_overall_1_leaf_wide.rdat $(prefix)/oc_p_overall_1_root_wide.rdat $(prefix)/tiled_oc_leaf_wide.rdat $(prefix)/tiled_oc_root_wide.rdat $(input_expr_diff) $(prefix)/all_features_diffs_wide.rdat $(prefix)/all_tss_diffs_wide.rdat |\
+                SGE_Array -q $(queues) -m 200G -r $(prefix)/j1_merge_all_features --hold_names $(prefix)/j9b_genfeatures_tiled_logs,$(prefix)/jm2_oc_leaf_wide_logs,$(prefix)/jm2_oc_root_wide_logs,$(prefix)/jm3.1_oc_p_overall_leaf_wide_logs,$(prefix)/jm3.2_oc_p_overall_leaf_wide_logs,$(prefix)/jm3.1_oc_p_overall_root_wide_logs,$(prefix)/jm3.2_oc_p_overall_root_wide_logs
+
+
+### Add AT content features
+tile_win=20
+peaks_online_fa = $(prefix)/peaks_3000_region_oneLine.fa
+
+%peaks_3000_region_oneLine.fa:
+	echo "cat $(prefix)/peaks_3000_region.fa  | awk '/^>/ {printf(\"\\n%s\\n\",\$$0);next; } { printf(\"%s\",\$$0);}  END {printf(\"\\n\");}' | tail -n +2 > $(prefix)/peaks_3000_region_oneLine.fa" |\
+		SGE_Array -q $(queues) -m 50G -r $(prefix)/j00_seqContent_fa_logs
+
+#get_all_features: %all_features_diffs_wide.rdat  %peaks_3000_region_oneLine.fa
+get_all_features: %peaks_3000_region_oneLine.fa
+	echo $(python_bin) $(scripts_dir)/seq_content/get_seq_content_tiled.py $(tile_win) 200 40 $(prefix)/at_tmp.csv $(prefix)/peaks_3000_region_oneLine.fa |\
+		SGE_Array -q $(queues) -m 50G -r $(prefix)/j00_seqContent_logs --hold_names $(prefix)/j0_remove_noExpr_pwms_logs,$(prefix)/j00_seqContent_fa_logs; \
+	echo "cat $(prefix)/at_tmp.csv | awk '{if (NR == 1) {print substr(\$$0,4)} else {print \$$0}}' > $(prefix)/peaks_3000_region_oneLine.fa.csv" |\
+		SGE_Array -q $(queues) -r $(prefix)/j01_edit_eader_logs --hold_name $(prefix)/j00_seqContent_logs; \
+	echo $(scripts_dir)/seq_content/merge_seqContent_to_allfeatures.R $(prefix)/all_features_diffs_wide.rdat $(prefix)/peaks_3000_region_oneLine.fa.csv $(prefix)/all_features_diffs_wide_withAT.rdat |\
+		SGE_Array -m 50G -q $(queues) -r $(prefix)/j02_seqCont_features_log --hold_names $(prefix)/j01_edit_eader_logs; \
+	echo $(scripts_dir)/seq_content/merge_seqContent_to_allTSSs.R $(prefix)/all_tss_diffs_wide.rdat $(prefix)/peaks_3000_region_oneLine.fa.csv $(prefix)/all_tss_diffs_wide_withAT.rdat |\
+                SGE_Array -m 300G -q $(queues) -r $(prefix)/j02_seqCont_features_tss_log --hold_names $(prefix)/j01_edit_eader_logs
+
+
+#### Remove no-expressed PWMs ###
+seqCont_file = $(prefix)/peaks_3000_region_oneLine.fa.csv
+
+%all_features_diffs_wide.rdat: combine_oc_tfbs_features
+	echo $(scripts_dir)/feature_utils/remove_pwms_from_feature_rdat.R $(prefix)/all_features_diffs_wide.rdat $(prefix)/all_tss_diffs_wide.rdat $(pwm_noexpr_coreless) $(prefix)/all_features_diffs_wide.rdat $(prefix)/all_tss_diffs_wide.rdat |\
+                SGE_Array -q $(queues) -m 300G -r $(prefix)/j0_remove_noExpr_pwms_logs --hold_names $(prefix)/j1_merge_all_features
+
+
+###################################################
+###   STEP-4 Model TRAIN/TEST		        ###
+###################################################
+train_test_model: train_l1
+
+copy_model:
+	cp $(model_outdir)/* $(final_model_outdir)/
+
+performance_plots:
+	echo $(scripts_dir)/utils_paper/prec_recall_curves.R $(roe_outdir_fc)/featureInfo_hardCodedSoftCoded.rdat $(roe_outdir_fc) |\
+                SGE_Array -q $(queues) -m 100G -r $(roe_outdir_fc)/j1_performance_plots_logs --hold_names $(roe_outdir_fc)/j1_featureInfo_hardSoftCode_logs
+
+train_l1: %tile_only_features_classed.csv
+	echo $(python_bin) $(scripts_dir)/ML/train_test_crossVal_noScale_l1.py -i $(model_outdir)/tile_only_features_classed.csv -o $(model_outdir) -n $(nfolds) -t tile_only |\
+		SGE_Array -q $(queues) -m 100G -r $(model_outdir)/j1_crossval_train_test --hold_names $(model_outdir)/j1_prepare_train_data_logs
+
+train_l2: %tile_only_features_classed.csv
+	echo $(python_bin) $(scripts_dir)/ML/train_test_crossVal_noScale_l2.py -i $(model_outdir)/tile_only_features_classed.csv -o $(model_outdir) -n $(nfolds) -t tile_only |\
+                SGE_Array -q $(queues) -m 100G -r $(model_outdir)/j1_crossval_train_test --hold_names $(model_outdir)/j1_prepare_train_data_logs
+
+train_tfbsonly: %tfbs_only_features_classed.csv
+	echo $(python_bin) $(scripts_dir)/ML/train_test_crossVal_noScale_l1.py -i $(model_outdir)/tfbs_only_features_classed.csv -o $(model_outdir) -n $(nfolds) -t tfbs_only |\
+		SGE_Array -q $(queues) -m 100G -r $(model_outdir)/j1_crossval_train_test_tfbsonly --hold_names $(model_outdir)/j1_prepare_train_data_tfbs_only_logs
+
+train_oconly: %oc_only_features_classed.csv
+	echo $(python_bin) $(scripts_dir)/ML/train_test_crossVal_noScale_l1.py -i $(model_outdir)/oc_only_features_classed.csv -o $(model_outdir) -n $(nfolds) -t oc_only |\
+		SGE_Array -q $(queues) -m 100G -r $(model_outdir)/j1_crossval_train_test_oconly --hold_names $(model_outdir)/j1_prepare_train_data_oc_only_logs
+
+%tile_only_features_classed.csv %tile_only_diff_info.csv:
+	echo $(scripts_dir)/ML/prepare_data_for_classification_fc_expr_thresholded.R $(prefix)/all_features_diffs_wide_withAT.rdat tile_only $(model_outdir)/tile_only_features_classed.csv $(model_outdir)/tile_only_diff_info.csv $(fc) $(mean_expr_file) $(expr_thr) |\
+		SGE_Array -m 100G -q $(queues) -r $(model_outdir)/j1_prepare_train_data_logs --hold_names $(model_outdir)/j1_merge_all_features
+
+%tile_only_allTSSs_features.csv %tile_only_allTSSs_diff_info.csv:
+	mkdir -p $(roe_outdir)
+	echo $(scripts_dir)/feature_utils/get_all_tss_features.R $(prefix)/all_features_diffs_wide_withAT.rdat $(prefix)/all_tss_diffs_wide_withAT.rdat tile_only $(roe_outdir)/all_tss_features_unscaled.csv $(roe_outdir)/all_tss_diff_info.csv $(fc) |\
+		SGE_Array -m 100G -q $(queues) -r $(prefix)/j1_get_all_tss_features_logs --hold_names $(prefix)/j02_seqCont_features_tss_log
+
+%tfbs_only_features_classed.csv:
+	echo $(scripts_dir)/ML/prepare_data_for_classification_fc_expr_thresholded.R $(prefix)/all_features_diffs_wide.rdat tfbs_only_tile $(model_outdir)/tfbs_only_features_classed.csv $(model_outdir)/tfbs_only_diff_info.csv $(fc) $(mean_expr_file) $(expr_thr) |\
+		SGE_Array -m 100G -q $(queues) -r $(model_outdir)/j1_prepare_train_data_tfbs_only_logs --hold_names $(model_outdir)/j1_merge_all_features
+
+%oc_only_features_classed.csv:
+	echo $(scripts_dir)/ML/prepare_data_for_classification_fc_expr_thresholded.R $(prefix)/all_features_diffs_wide.rdat oc_only $(model_outdir)/oc_only_features_classed.csv $(model_outdir)/oc_only_diff_info.csv $(fc) $(mean_expr_file) $(expr_thr) |\
+		SGE_Array -m 100G -q $(queues) -r $(model_outdir)/j1_prepare_train_data_oc_only_logs --hold_names $(prefix)/j1_merge_all_features
+
+### Extract Feature sets as a single package
+%tissue_preds_all_tss.csv: %tile_only_allTSSs_features.csv
+	mkdir -p $(roe_outdir_fc)
+	echo $(python_bin) $(scripts_dir)/ML/get_feature_info_from_pymodel_noScale.py $(model_outdir)/$(roe_seed)/tile_only_model.sav $(model_outdir)/$(roe_seed)/unscaled_train.npy $(roe_outdir)/all_tss_features_unscaled.csv $(roe_outdir_fc)/tissue_preds_all_tss.csv $(roe_outdir_fc)/all_tss_features_scaled.tsv |\
+		SGE_Array -m 100G -q $(queues) -r $(roe_outdir_fc)/j1_get_tss_probs_logs --hold_names $(prefix)/j1_get_all_tss_features_logs
+
+feature_package_roe: %tissue_preds_all_tss.csv
+	echo $(scripts_dir)/feature_utils/get_feature_package.R $(prefix)/all_tss_diffs_wide_withAT.rdat $(roe_outdir_fc)/tissue_preds_all_tss.csv $(model_outdir)/$(roe_seed)/tile_only_train_tss_ids.txt $(model_outdir)/$(roe_seed)/tile_only_test_tss_ids.txt $(model_outdir)/$(roe_seed)/tile_only_coef_table.txt tile_only $(roe_outdir_fc) $(fc) |\
+		SGE_Array -m 100G -q $(queues) -r $(roe_outdir_fc)/j1_feature_package_logs --hold_names $(roe_outdir_fc)/j1_get_tss_probs_logs
+
+%featureInfo_hardCodedSoftCoded.rdat: feature_package_roe
+	echo $(scripts_dir)/feature_utils/get_feature_package_harcoded_softcode.R $(prefix)/all_features_diffs_wide_withAT.rdat $(roe_outdir_fc)/feature_info.tsv $(roe_outdir_fc)/tss_info.tsv $(roe_outdir_fc)/featureInfo_hardCodedSoftCoded.rdat |\
+		SGE_Array -m 100G -q $(queues) -r $(roe_outdir_fc)/j1_featureInfo_hardSoftCode_logs --hold_names $(roe_outdir_fc)/j1_feature_package_logs
+

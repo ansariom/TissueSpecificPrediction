@@ -1,0 +1,54 @@
+queues = megraw,*@megraw2*,bpp@*
+python_bin = /local/cluster/bin/python
+prefix = pwm_removal/tile
+nfolds = 5
+
+#fc 3 med-high
+roe_seed = 67086
+
+main_dir = ../pipeline_output_tile
+orig_coefs = $(main_dir)/med_high/$(fc)/l1_logreg/$(roe_seed)/tile_only_coef_table.txt
+from = 5
+to = 70
+by = 20
+
+features = $(main_dir)//all_features_diffs_wide_withAT.rdat
+#
+fc = 3
+mean_expr_file = external_tools/RNASeq_run1199/rsem_output/ath_root_leaf_rsem_deseq_diff_expr_results_filtered.txt
+expr_thr = "med_high"
+fc_out = $(prefix)/$(fc)
+
+src_rm_dir = ../scripts/pwm_removal/
+src_ml_dir = ../scripts/ML/
+src_utils_dir = ../scripts/utils_paper
+
+all:
+	mkdir -p $(fc_out)
+	echo $(src_rm_dir)/extract_pwms_for_removal.R $(orig_coefs) $(fc_out) $(from) $(to) $(by) | SGE_Array -q $(queues) -m 10G -r j1_init_logs; \
+	n=$(from); while [[ $$n -le $(to) ]]; do \
+		echo $$n; \
+		outdir=$(fc_out)/top$$n; \
+		mkdir $$outdir; \
+		echo $(src_utils_dir)/remove_features.R $(features) $(fc_out)/top$$n\_pwms.txt $$outdir  top$$n | \
+			SGE_Array -q $(queues) -m 100G -r $$outdir/j1_rm_features_$$n --hold_names j1_init_logs;\
+		echo $(src_ml_dir)/prepare_data_for_classification_fc_expr_thresholded.R $$outdir/all_features_diffs_wide_top$$n\_removal.rdat tile_only $$outdir/tile_only_features_classed.csv $$outdir/tile_only_diff_info.csv $(fc) $(mean_expr_file) $(expr_thr) |\
+			SGE_Array -m 100G -q $(queues) -r $$outdir/j1_prepare_train_data_$$n --hold_names $$outdir/j1_rm_features_$$n;\
+		echo $(python_bin) $(src_ml_dir)/train_test_crossVal_noScale_l1.py -i $$outdir/tile_only_features_classed.csv -o $$outdir -n $(nfolds) -t tile_only |\
+			SGE_Array -q $(queues) -m 100G -r $$outdir/j1_crossval_train_test_$$n --hold_names $$outdir/j1_prepare_train_data_$$n; \
+		((n = n + $(by))); \
+	done
+
+perfromance_gathering:
+	i=$(from); while [[ $$i -lt $(to) ]]; do \
+        	indir=$(fc_out)/top$$i; \
+                echo $$indir; \
+                outfile=$(fc_out)/performances_top$$i\.txt; \
+                head $$indir/[1-9]*/*held* | grep -v "==" | grep -v "auroc" > $$outfile; \
+		((i = i+$(by))); \
+        done
+
+plot:
+	mkdir $(fc_out)/perf_tables;  mv $(fc_out)/performances_top* $(fc_out)/perf_tables; \
+        $(src_rm_dir)/plot_removal_performance.R $(fc_out)/perf_tables $(fc_out)/perf_plot Tiled $(from) $(to) $(by)
+
