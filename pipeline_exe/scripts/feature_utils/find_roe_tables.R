@@ -94,6 +94,7 @@ plot_roe <- function(plot_outdir) {
   dimnames(outTable)[[1]] <- pwmName
   write.table(outTable, file=outfname, row.names=T, col.names=T, quote=F, sep="	")
   # Plot ROEs
+  print("plot.....")
   subT <- paste("Interval = [", toString(format(left, digits=2)), ",", toString(format(right, digits=2)), "]")
   mainT <- paste(pwmName, subT, sep="\n")
   plot_filename <- paste(plot_outdir, "/", f, ".jpg", sep="")
@@ -105,7 +106,8 @@ plot_roe <- function(plot_outdir) {
   points(locs[locs >= left & locs <= right], scores[locs >= left & locs <= right], col='red', pch=1)
   points(peak_mode_loc, maxbgval, pch=20, col='green')
   arrows(left, maxbgval, right, maxbgval, col='green', length=0.1, code=3)
-  results <- dev.off()
+  #results <- dev.off()
+  dev.off()
 }
 
 # Initial screeing for existance of ROE
@@ -187,8 +189,13 @@ table_outbase <- args[4]
 strands <- c("FWD", "REV")
 
 # Init default parameters 
-w <- 200 # win length for signal mode finder
-span <- 0.01 # span size [0,1] (small values = more sensitive)
+w_human <- 300 # win length for signal mode finder
+span_human <- 0.002 # span size [0,1] (small values = more sensitive)
+w_ath <- 200
+span_ath <- 0.01
+
+w = w_human
+span = span_human
 buffer_left <- 100
 buffer_right <- 100
 peak_mode_loc <- -6000
@@ -230,7 +237,7 @@ for (f in flist) {
   
   if (length(mod_idxes) < 1 ) {
     print("no peaks are found!")
-    printout_NA_table()
+    printout_NA_table(outfname)
     next
   }
   

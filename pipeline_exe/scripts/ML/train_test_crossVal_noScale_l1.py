@@ -16,7 +16,7 @@ import pickle
 from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import train_test_split
 
-max_param = 3
+max_param = 2
 all_features = []
 test_all_features = []
 train_all_labels = []
@@ -28,7 +28,7 @@ learning_rate = 0.1
 training_epochs = 200
 batch_size = 100
 display_step = 50
-weight_decays = np.arange(0.01, max_param ,0.1) 
+weight_decays = np.arange(0.005, max_param ,0.05) 
 fold = 0
 fold_results = []
 outdir = "-"
@@ -40,7 +40,7 @@ def split_data_train_test(seed):
 
     #np.random.seed(seed)
     all_features_ = np.asarray(all_features[:, 1:-1], float32)
-    all_labels_ = np.asarray(all_features[:, -1],int32).reshape(len(all_features), 1)
+    all_labels_ = np.asarray(all_features[:, -1],int32).reshape(len(all_features), )
     
     np.random.seed(seed)
     train_all_features, test_all_features, train_all_labels, test_all_labels = train_test_split(all_features_, all_labels_, test_size=0.2)
@@ -260,6 +260,10 @@ if __name__ == "__main__":
 #        scaled_test_all = scaler.transform(test_all_features)
 	scaled_train_all = train_all_features
 	scaled_test_all = test_all_features
+	print(scaled_train_all.shape)
+	print(scaled_test_all.shape)
+	print(train_all_labels.shape)
+	print(test_all_labels.shape)
         auroc, auprc, tpr, fpr = linear_model_simple(scaled_train_all, train_all_labels, scaled_test_all, test_all_labels, mean_param, save_model = True)
         
         test_outfile = outdir + "/" + argsDict["model_type"] + "_heldout_test.txt"
