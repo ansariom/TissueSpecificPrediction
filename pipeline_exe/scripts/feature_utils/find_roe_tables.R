@@ -73,6 +73,8 @@ plot_modes <- function(plot_outdir) {
 # Plot ROE peaks
 #=============================================
 plot_roe <- function(plot_outdir) {
+  locs = orig_dist_tbl[,1]
+  scores = orig_dist_tbl[,2]
   left <- locs[leftind]
   right <- locs[rightind]
   peak_mode_loc <- locs[peak_mod_index]
@@ -181,18 +183,20 @@ outdir <- args[2]
 pwm_labels <- args[3]
 table_outbase <- args[4]
 
-#input_dist_dir <- "~/Downloads/dists/"
-#outdir <- "~/Downloads/ibdc/new_roe"
-#pwm_labels <- "~/Downloads/ibdc/pwm_labels.txt"
-#table_outbase <- "roe_table"
+input_dist_dir <- "~/Downloads/dists/"
+outdir <- "~/Downloads/dists/roe_plots/"
+pwm_labels <- "~/Downloads/pwm_labels.txt"
+table_outbase <- "roe_table"
 
 strands <- c("FWD", "REV")
 
 # Init default parameters 
-w_human <- 300 # win length for signal mode finder
-span_human <- 0.002 # span size [0,1] (small values = more sensitive)
+w_human <- 200 # win length for signal mode finder
+span_human <- 0.1 # span size [0,1] (small values = more sensitive)
+
 w_ath <- 200
 span_ath <- 0.01
+p = 1.4 #max peak height - avg peak height shoud be > p
 
 w = w_human
 span = span_human
@@ -215,13 +219,25 @@ for(strand in strands) {
 for (f in flist) {
   #f <- flist[3]
   dist_tbl <- read.table(paste(indir, f, sep = ""), header = F)
+  orig_dist_tbl = dist_tbl
   print(paste(indir, f, sep = ""))
+  ###
+  a = dist_tbl
+  a$locs = cut(a$V1, breaks = 200)
+  b = aggregate(a$V2, list(a$locs), mean)
+  m = merge(a, b, by.x = "locs", by.y = "Group.1")
+  #b$Group.1 <- seq(1, nrow(b))
+  dist_tbl = m[,c(2,4)]
+  colnames(dist_tbl) <- c("V1", "V2")
+  dist_tbl = dist_tbl[order(dist_tbl$V1),]
+  #plot(dist_tbl$V1, dist_tbl$V2)
+  ###
   locs <- dist_tbl[,1] 
   scores <- dist_tbl[,2] 
   maxdist <- length(locs)/2 
   outfname <- paste(outdir, "/", f, ".", strand, ".table", sep = "")
 
-  
+  #w = nrow(dist_tbl) / 5
   # find the modes and plot them
   if (length(locs) < (w * 2)) {
     print("no peaks are found!")
@@ -265,7 +281,7 @@ for (f in flist) {
   #peaks_mod_mean <- mean(smooth_scores[mod_idxes != max_mod_idx])
   #cutoff <- mean(smooth_scores[mod_idxes]) + sd(smooth_scores[mod_idxes])
   #mod_idxes[smooth_scores[mod_idxes] > peaks_mod_mean]
-  
+
   cutoff <- sort(smooth_scores[mod_idxes], decreasing = T)[last_idx]
   above_avg_mod_idxes <- mod_idxes[which((smooth_scores[mod_idxes] >= cutoff))]
   if (length(above_avg_mod_idxes) < 1) {
@@ -278,13 +294,16 @@ for (f in flist) {
   #thr <- quantile(density(scores)$x)[[4]] + abs(quantile(density(scores)$x)[[4]] - max(density(scores)$x)) / 2
   #extreme_max_idxs <- which(scores > thr)
   #max_idx <- get_max_peak(above_avg_mod_idxes, extreme_max_idxs)
+  
+  ## Ath config (keep it)
   max_sc <- sort(smooth_scores[above_avg_mod_idxes], decreasing = T)[1]
   m <- mean(density(smooth_scores)$x)
-  if (max_sc - m < 60) {
+  if (max_sc / m < p) {
     print("No Peakkkkkkkk_____________")
     printout_NA_table(outfname)
     next
   }
+  
   
   max_idx <- which(smooth_scores == max_sc)
   #if (locs[max_idx] <= -1500 | locs[max_idx] >= 1500) {
