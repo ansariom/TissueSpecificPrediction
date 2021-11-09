@@ -16,7 +16,7 @@ import pickle
 from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import train_test_split
 
-max_param = 2
+max_param = 3
 all_features = []
 test_all_features = []
 train_all_labels = []
@@ -28,7 +28,7 @@ learning_rate = 0.1
 training_epochs = 200
 batch_size = 100
 display_step = 50
-weight_decays = np.arange(0.005, max_param ,0.05) 
+weight_decays = np.arange(0.01, max_param ,0.05) 
 fold = 0
 fold_results = []
 outdir = "-"
@@ -153,7 +153,7 @@ def split_train_cross_val(nfold):
 '           Train and Test Method'
 '============================================='
 def linear_model_simple(train_features, train_labels, test_features, test_labels, param, save_model = False):
-    logreg = linear_model.LogisticRegression(C=param, penalty='l1')
+    logreg = linear_model.LogisticRegression(C=param, penalty='l2')
     logreg.fit(train_features, train_labels)
     y_pred_prob = logreg.predict_proba(test_features) 
     if save_model:
